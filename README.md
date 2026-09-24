@@ -1,4 +1,3 @@
-==START==
 # Options Pricer
 
 A from-scratch options pricing library in Python:
@@ -88,4 +87,3 @@ Binomial tree (CRR): u = exp(sigma*sqrt(dt)), d = 1/u, p = (exp((r-q)*dt) - d) /
 ## License
 
 MIT
-==END==
