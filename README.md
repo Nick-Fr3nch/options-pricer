@@ -1,3 +1,15 @@
+## Web App
+
+Run the interactive Streamlit UI:
+
+    streamlit run app.py
+
+Opens a browser at http://localhost:8501 with three tabs:
+
+- **Pricer** — Black-Scholes and CRR prices for any input
+- **Greeks** — Delta, Gamma, Vega, Theta, Rho
+- **Live IV Smile** — pull any ticker's option chain and plot the smile
+
 # Options Pricer
 
 A from-scratch options pricing library in Python:
