@@ -12,6 +12,7 @@ import numpy as np
 import streamlit as st
 import yfinance as yf
 import time
+import pandas as pd
 
 from pricer.black_scholes import bs_price
 from pricer.binomial import crr_price
@@ -68,56 +69,174 @@ with tab2:
 with tab3:
     st.subheader("Live Implied Volatility Smile")
 
-    ticker_symbol = st.text_input("Ticker", value="AAPL")
+    import os
+
+    mode = st.radio(
+        "Data source",
+        ["Bundled sample (always works)", "Live fetch (may fail on cloud)"],
+        horizontal=True,
+    )
+
     r_market = st.number_input("Risk-free rate for IV calc", value=0.05, step=0.005, format="%.4f")
 
-    if ticker_symbol:
-        ticker = yf.Ticker(ticker_symbol)
+    if mode == "Bundled sample (always works)":
+        data_dir = "data"
+        if not os.path.isdir(data_dir):
+            st.error("No bundled data found. Run the setup script to create it.")
+            st.stop()
 
-        S_live = None
-        all_expirations = ()
-        last_error = None
+        with open(f"{data_dir}/metadata.txt") as f:
+            lines = f.read().splitlines()
+        S_live = float(lines[0])
+        expiry = lines[1]
 
-        for attempt in range(3):
+        calls = pd.read_csv(f"{data_dir}/AAPL_{expiry}_calls.csv")
+        puts = pd.read_csv(f"{data_dir}/AAPL_{expiry}_puts.csv")
+
+        today = datetime.today()
+        expiry_dt = datetime.strptime(expiry, "%Y-%m-%d")
+        T_live = (expiry_dt - today).days / 365.0
+
+        st.caption(f"Bundled AAPL chain — expiry {expiry}, spot {S_live:.2f}, T = {T_live:.3f}y")
+
+        def get_mid(row):
+            bid, ask = row["bid"], row["ask"]
+            last = row.get("lastPrice", 0.0)
+            if bid > 0 and ask > 0:
+                return 0.5 * (bid + ask)
+            if last > 0:
+                return float(last)
+            return np.nan
+
+        def iv_row(row, opt_type):
+            K_live = row["strike"]
+            price = get_mid(row)
+            if np.isnan(price) or price <= 0:
+                return np.nan
             try:
-                hist = ticker.history(period="1d")
-                if hist.empty:
-                    last_error = "No price data"
-                    time.sleep(1.0)
-                    continue
-                S_live = float(hist["Close"].iloc[-1])
+                return implied_vol(price, S_live, K_live, T_live, r_market, 0.0, opt_type)
+            except Exception:
+                return np.nan
 
-                opts = ticker.options
-                if not opts:
-                    last_error = "No options data"
-                    time.sleep(1.5)
-                    continue
+        calls["iv"] = calls.apply(lambda r_: iv_row(r_, "call"), axis=1)
+        puts["iv"] = puts.apply(lambda r_: iv_row(r_, "put"), axis=1)
 
-                all_expirations = opts
-                break
-            except Exception as e:
-                last_error = str(e)
-                time.sleep(1.5)
+        otm_calls = calls[(calls["strike"] > S_live) & calls["iv"].notna()]
+        otm_puts = puts[(puts["strike"] < S_live) & puts["iv"].notna()]
 
-        if S_live is None or not all_expirations:
-            st.error(
-                f"Could not fetch market data for {ticker_symbol}. "
-                f"Yahoo Finance may be rate-limiting the cloud server. "
-                f"Try again in a moment, or try a different ticker like MSFT or SPY. "
-                f"(Last error: {last_error})"
-            )
+        if otm_calls.empty and otm_puts.empty:
+            st.warning("No valid IVs. The bundled data may be stale.")
         else:
-            today = datetime.today()
-            future_expirations = [
-                e for e in all_expirations
-                if (datetime.strptime(e, "%Y-%m-%d") - today).days >= 1
-            ]
+            fig, ax = plt.subplots(figsize=(10, 5))
+            ax.plot(otm_calls["strike"], otm_calls["iv"] * 100, "o-", label="OTM Calls", markersize=4)
+            ax.plot(otm_puts["strike"], otm_puts["iv"] * 100, "o-", label="OTM Puts", markersize=4)
+            ax.axvline(S_live, color="black", linestyle="--", label=f"Spot = {S_live:.2f}")
+            ax.set_xlabel("Strike")
+            ax.set_ylabel("Implied Volatility (%)")
+            ax.set_title(f"IV Smile — AAPL {expiry} (T = {T_live:.3f}y)")
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+            st.pyplot(fig)
 
-            if not future_expirations:
-                st.error("No future expirations available for this ticker.")
+    else:
+        ticker_symbol = st.text_input("Ticker", value="AAPL")
+
+        if ticker_symbol:
+            ticker = yf.Ticker(ticker_symbol)
+
+            S_live = None
+            all_expirations = ()
+            last_error = None
+
+            for attempt in range(3):
+                try:
+                    hist = ticker.history(period="1d")
+                    if hist.empty:
+                        last_error = "No price data"
+                        time.sleep(1.0)
+                        continue
+                    S_live = float(hist["Close"].iloc[-1])
+                    opts = ticker.options
+                    if not opts:
+                        last_error = "No options data"
+                        time.sleep(1.5)
+                        continue
+                    all_expirations = opts
+                    break
+                except Exception as e:
+                    last_error = str(e)
+                    time.sleep(1.5)
+
+            if S_live is None or not all_expirations:
+                st.error(
+                    f"Yahoo Finance is rate-limiting this cloud server (HTTP 429). "
+                    f"This is a known limitation of yfinance on Streamlit Cloud. "
+                    f"Use the bundled sample mode above for a working demo."
+                )
             else:
-                expiry = st.selectbox("Expiry", future_expirations)
+                today = datetime.today()
+                future_expirations = [
+                    e for e in all_expirations
+                    if (datetime.strptime(e, "%Y-%m-%d") - today).days >= 1
+                ]
 
-                if st.button("Fetch and compute"):
-                    # ... rest of your existing code inside the button block ...
-                    pass
+                if not future_expirations:
+                    st.error("No future expirations available.")
+                else:
+                    expiry = st.selectbox("Expiry", future_expirations)
+
+                    if st.button("Fetch and compute"):
+                        try:
+                            chain = ticker.option_chain(expiry)
+                        except Exception as e:
+                            st.error(f"Fetch failed: {type(e).__name__}: {e}")
+                            st.stop()
+
+                        calls = chain.calls.copy()
+                        puts = chain.puts.copy()
+
+                        if calls.empty or puts.empty:
+                            st.error("yfinance returned an empty chain. Yahoo is rate-limiting this cloud IP.")
+                            st.stop()
+
+                        expiry_dt = datetime.strptime(expiry, "%Y-%m-%d")
+                        T_live = (expiry_dt - today).days / 365.0
+
+                        def get_mid(row):
+                            bid, ask = row["bid"], row["ask"]
+                            last = row.get("lastPrice", 0.0)
+                            if bid > 0 and ask > 0:
+                                return 0.5 * (bid + ask)
+                            if last > 0:
+                                return float(last)
+                            return np.nan
+
+                        def iv_row(row, opt_type):
+                            K_live = row["strike"]
+                            price = get_mid(row)
+                            if np.isnan(price) or price <= 0:
+                                return np.nan
+                            try:
+                                return implied_vol(price, S_live, K_live, T_live, r_market, 0.0, opt_type)
+                            except Exception:
+                                return np.nan
+
+                        calls["iv"] = calls.apply(lambda r_: iv_row(r_, "call"), axis=1)
+                        puts["iv"] = puts.apply(lambda r_: iv_row(r_, "put"), axis=1)
+
+                        otm_calls = calls[(calls["strike"] > S_live) & calls["iv"].notna()]
+                        otm_puts = puts[(puts["strike"] < S_live) & puts["iv"].notna()]
+
+                        if otm_calls.empty and otm_puts.empty:
+                            st.warning("No valid IVs computed.")
+                        else:
+                            fig, ax = plt.subplots(figsize=(10, 5))
+                            ax.plot(otm_calls["strike"], otm_calls["iv"] * 100, "o-", label="OTM Calls", markersize=4)
+                            ax.plot(otm_puts["strike"], otm_puts["iv"] * 100, "o-", label="OTM Puts", markersize=4)
+                            ax.axvline(S_live, color="black", linestyle="--", label=f"Spot = {S_live:.2f}")
+                            ax.set_xlabel("Strike")
+                            ax.set_ylabel("Implied Volatility (%)")
+                            ax.set_title(f"IV Smile — {ticker_symbol} {expiry} (T = {T_live:.3f}y)")
+                            ax.legend()
+                            ax.grid(True, alpha=0.3)
+                            st.pyplot(fig)
