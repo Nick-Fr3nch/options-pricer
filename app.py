@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import streamlit as st
 import yfinance as yf
+import time
 
 from pricer.black_scholes import bs_price
 from pricer.binomial import crr_price
@@ -72,15 +73,41 @@ with tab3:
 
     if ticker_symbol:
         ticker = yf.Ticker(ticker_symbol)
-        hist = ticker.history(period="1d")
 
-        if hist.empty:
-            st.error(f"Could not fetch spot price for {ticker_symbol}.")
+        S_live = None
+        all_expirations = ()
+        last_error = None
+
+        for attempt in range(3):
+            try:
+                hist = ticker.history(period="1d")
+                if hist.empty:
+                    last_error = "No price data"
+                    time.sleep(1.0)
+                    continue
+                S_live = float(hist["Close"].iloc[-1])
+
+                opts = ticker.options
+                if not opts:
+                    last_error = "No options data"
+                    time.sleep(1.5)
+                    continue
+
+                all_expirations = opts
+                break
+            except Exception as e:
+                last_error = str(e)
+                time.sleep(1.5)
+
+        if S_live is None or not all_expirations:
+            st.error(
+                f"Could not fetch market data for {ticker_symbol}. "
+                f"Yahoo Finance may be rate-limiting the cloud server. "
+                f"Try again in a moment, or try a different ticker like MSFT or SPY. "
+                f"(Last error: {last_error})"
+            )
         else:
-            S_live = float(hist["Close"].iloc[-1])
             today = datetime.today()
-
-            all_expirations = ticker.options
             future_expirations = [
                 e for e in all_expirations
                 if (datetime.strptime(e, "%Y-%m-%d") - today).days >= 1
@@ -92,68 +119,5 @@ with tab3:
                 expiry = st.selectbox("Expiry", future_expirations)
 
                 if st.button("Fetch and compute"):
-                    with st.spinner("Pulling option chain..."):
-                        chain = ticker.option_chain(expiry)
-                        calls = chain.calls.copy()
-                        puts = chain.puts.copy()
-
-                        expiry_dt = datetime.strptime(expiry, "%Y-%m-%d")
-                        T_live = (expiry_dt - today).days / 365.0
-
-                        def get_mid(row):
-                            """Prefer mid of bid/ask; fall back to lastPrice."""
-                            bid, ask = row["bid"], row["ask"]
-                            last = row.get("lastPrice", 0.0)
-                            if bid > 0 and ask > 0:
-                                return 0.5 * (bid + ask), "bid/ask"
-                            if last > 0:
-                                return float(last), "last"
-                            return np.nan, "none"
-
-                        def iv_row(row, opt_type):
-                            K_live = row["strike"]
-                            price, source = get_mid(row)
-                            if np.isnan(price) or price <= 0:
-                                return np.nan
-                            try:
-                                return implied_vol(price, S_live, K_live, T_live, r_market, 0.0, opt_type)
-                            except Exception:
-                                return np.nan
-
-                        calls["iv"] = calls.apply(lambda r_: iv_row(r_, "call"), axis=1)
-                        puts["iv"] = puts.apply(lambda r_: iv_row(r_, "put"), axis=1)
-
-                        # Diagnostics
-                        with st.expander("Data diagnostics"):
-                            st.write(f"Spot: {S_live:.2f}")
-                            st.write(f"Expiry: {expiry}")
-                            st.write(f"T (years): {T_live:.4f} ({(expiry_dt - today).days} days)")
-                            st.write(f"Total calls: {len(calls)}, total puts: {len(puts)}")
-                            st.write(f"Calls with bid>0 & ask>0: {((calls['bid'] > 0) & (calls['ask'] > 0)).sum()}")
-                            st.write(f"Calls with lastPrice>0: {(calls['lastPrice'] > 0).sum()}")
-                            st.write(f"Calls with IV computed: {calls['iv'].notna().sum()}")
-                            st.write(f"Puts with IV computed: {puts['iv'].notna().sum()}")
-                            st.write("Sample rows:")
-                            st.dataframe(calls[["strike", "bid", "ask", "lastPrice", "iv"]].head(10))
-
-                        otm_calls = calls[(calls["strike"] > S_live) & calls["iv"].notna()]
-                        otm_puts = puts[(puts["strike"] < S_live) & puts["iv"].notna()]
-
-                        if otm_calls.empty and otm_puts.empty:
-                            st.warning("No valid IVs computed. Check the diagnostics panel above.")
-                        else:
-                            fig, ax = plt.subplots(figsize=(10, 5))
-                            ax.plot(otm_calls["strike"], otm_calls["iv"] * 100, "o-",
-                                    label="OTM Calls", markersize=4)
-                            ax.plot(otm_puts["strike"], otm_puts["iv"] * 100, "o-",
-                                    label="OTM Puts", markersize=4)
-                            ax.axvline(S_live, color="black", linestyle="--",
-                                       label=f"Spot = {S_live:.2f}")
-                            ax.set_xlabel("Strike")
-                            ax.set_ylabel("Implied Volatility (%)")
-                            ax.set_title(f"IV Smile — {ticker_symbol} {expiry} (T = {T_live:.3f}y)")
-                            ax.legend()
-                            ax.grid(True, alpha=0.3)
-                            st.pyplot(fig)
-
-                            st.write(f"Spot: **{S_live:.2f}** | Expiry: **{expiry}** | Days: **{(expiry_dt - today).days}**")
+                    # ... rest of your existing code inside the button block ...
+                    pass
